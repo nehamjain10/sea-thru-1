@@ -16,7 +16,6 @@ from skimage import exposure
 from skimage.restoration import denoise_bilateral, denoise_tv_chambolle, estimate_sigma
 from skimage.morphology import closing, opening, erosion, dilation, disk, diamond, square
 
-matplotlib.use('TkAgg')
 
 '''
 Finds points for which to estimate backscatter
@@ -613,7 +612,7 @@ if __name__ == '__main__':
     parser.add_argument('--monodepth', action='store_true',default=False, help='Preprocess for monodepth')
     parser.add_argument('--monodepth-add-depth', type=float, default=2.0, help='Additive value for monodepth map')
     parser.add_argument('--monodepth-multiply-depth', type=float, default=10.0, help='Multiplicative value for monodepth map')
-    parser.add_argument('--equalize-image', action='store_true',default=True, help='Histogram equalization for final output')
+    parser.add_argument('--equalize-image', action='store_true',default=False, help='Histogram equalization for final output')
     args = parser.parse_args()
 
     if args.preprocess_for_monodepth:
