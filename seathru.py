@@ -10,6 +10,7 @@ import math
 from PIL import Image
 import rawpy
 import matplotlib
+import cv2
 from matplotlib import pyplot as plt
 from skimage import exposure
 from skimage.restoration import denoise_bilateral, denoise_tv_chambolle, estimate_sigma
@@ -309,13 +310,58 @@ def refine_neighborhood_map(nmap, min_size = 10, radius = 3):
     refined_nmap = closing(refined_nmap, square(radius))
     return refined_nmap, num_labels - 1
 
+def process_image(filepath):
+  ''' Gets image from filepath.performs linearization and demosaicing'''
+  def get_channels(bayer_image):
+    red = bayer_image[1::2,1::2]
+    blue = bayer_image[0::2,0::2]
+    green1 = bayer_image[1::2,0::2]
+    green2 = bayer_image[0::2,1::2]
+    green = (green1 + green2)/2
+    return red, green, blue
+  
+  #Loading the RGB image
+  with rawpy.imread(filepath) as raw1:
+      rgb=raw1.raw_image_visible
+      saturation=raw1.camera_white_level_per_channel[0]
+      black=min(raw1.black_level_per_channel[0],rgb.min())
+      rgb=rgb.astype(np.float64)
+      rgb_linearized=(rgb-black)/(saturation-black)
+      rgb1=get_channels(rgb_linearized)
+      rgb_image=np.dstack(rgb1)
+      raw1.close()
+ 
+  return np.array(rgb_image)
+
+def image_resize(image, width = None, height = None, inter = cv2.INTER_AREA):
+  ''' Function to Resize Image '''
+  dim = None
+  (h, w) = image.shape[:2]
+  
+  if width is None and height is None:
+      return image
+  
+  if width is not None and height is not None:
+    return cv2.resize(image,(width,height),interpolation=inter)
+
+  if width is None:
+      r = height / float(h)
+      dim = (int(w * r), height)
+  else:
+      r = width / float(w)
+      dim = (width, int(h * r))
+
+  resized = cv2.resize(image, dim, interpolation = inter)
+
+  return resized
 
 def load_image_and_depth_map(img_fname, depths_fname, size_limit = 1024):
+
     depths = Image.open(depths_fname)
-    img = Image.fromarray(rawpy.imread(img_fname).postprocess())
-    img.thumbnail((size_limit, size_limit), Image.ANTIALIAS)
-    depths = depths.resize(img.size, Image.ANTIALIAS)
-    return np.float32(img) / 255.0, np.array(depths)
+    img  = process_image(img_fname)
+    resized_img = image_resize(img,width=size_limit)
+
+    return resized_img,image_resize(np.array(depths),height=resized_img.shape[0],width=size_limit)
 
 '''
 White balance with 'grey world' hypothesis
@@ -441,9 +487,9 @@ def run_pipeline(img, depths, args):
         plt.show()
 
     print('Estimating illumination...', flush=True)
-    illR = estimate_illumination(img[:, :, 0], Br, nmap, n, p=args.p, max_iters=100, tol=1E-5, f=args.f)
-    illG = estimate_illumination(img[:, :, 1], Bg, nmap, n, p=args.p, max_iters=100, tol=1E-5, f=args.f)
-    illB = estimate_illumination(img[:, :, 2], Bb, nmap, n, p=args.p, max_iters=100, tol=1E-5, f=args.f)
+    illR = estimate_illumination(img[:, :, 0], Br, nmap, n, p=args.p, max_iters=10000, tol=1E-5, f=args.f)
+    illG = estimate_illumination(img[:, :, 1], Bg, nmap, n, p=args.p, max_iters=10000, tol=1E-5, f=args.f)
+    illB = estimate_illumination(img[:, :, 2], Bb, nmap, n, p=args.p, max_iters=10000, tol=1E-5, f=args.f)
     ill = np.stack([illR, illG, illB], axis=2)
     if args.output_graphs:
         plt.imshow(ill)
@@ -557,17 +603,17 @@ if __name__ == '__main__':
     parser.add_argument('--output', default='output.png', help='Output filename')
     parser.add_argument('--f', type=float, default=2.0, help='f value (controls brightness)')
     parser.add_argument('--l', type=float, default=0.5, help='l value (controls balance of attenuation constants)')
-    parser.add_argument('--p', type=float, default=0.01, help='p value (controls locality of illuminant map)')
+    parser.add_argument('--p', type=float, default=0.001, help='p value (controls locality of illuminant map)')
     parser.add_argument('--min-depth', type=float, default=0.1, help='Minimum depth value to use in estimations (range 0-1)')
     parser.add_argument('--max-depth', type=float, default=1.0, help='Replacement depth percentile value for invalid depths (range 0-1)')
     parser.add_argument('--spread-data-fraction', type=float, default=0.01, help='Require data to be this fraction of depth range away from each other in attenuation estimations')
-    parser.add_argument('--size', type=int, default=320, help='Size to output')
-    parser.add_argument('--output-graphs', action='store_true', help='Output graphs')
-    parser.add_argument('--preprocess-for-monodepth', action='store_true', help='Preprocess for monodepth depth maps')
-    parser.add_argument('--monodepth', action='store_true', help='Preprocess for monodepth')
+    parser.add_argument('--size', type=int, default=1024, help='Size to output')
+    parser.add_argument('--output-graphs', default =False, action='store_true', help='Output graphs')
+    parser.add_argument('--preprocess-for-monodepth', action='store_true',default=False, help='Preprocess for monodepth depth maps')
+    parser.add_argument('--monodepth', action='store_true',default=False, help='Preprocess for monodepth')
     parser.add_argument('--monodepth-add-depth', type=float, default=2.0, help='Additive value for monodepth map')
     parser.add_argument('--monodepth-multiply-depth', type=float, default=10.0, help='Multiplicative value for monodepth map')
-    parser.add_argument('--equalize-image', action='store_true', help='Histogram equalization for final output')
+    parser.add_argument('--equalize-image', action='store_true',default=True, help='Histogram equalization for final output')
     args = parser.parse_args()
 
     if args.preprocess_for_monodepth:
@@ -580,9 +626,11 @@ if __name__ == '__main__':
         else:
             depths = preprocess_sfm_depth_map(depths, args.min_depth, args.max_depth)
         recovered = run_pipeline(img, depths, args)
+        
         if args.equalize_image:
             recovered = exposure.equalize_adapthist(np.array(recovered), clip_limit=0.03)
             sigma_est = estimate_sigma(recovered, multichannel=True, average_sigmas=True)
             recovered = denoise_tv_chambolle(recovered, sigma_est, multichannel=True)
+    
         plt.imsave(args.output, recovered)
         print('Done.')
