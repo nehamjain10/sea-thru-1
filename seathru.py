@@ -5,11 +5,14 @@ import numpy as np
 import sklearn as sk
 import scipy as sp
 import scipy.optimize
+import csv
 import scipy.stats
+import scipy.io
 import math
 from PIL import Image
 import rawpy
 import matplotlib
+import imageio
 import cv2
 from matplotlib import pyplot as plt
 from skimage import exposure
@@ -46,7 +49,7 @@ def find_backscatter_estimation_points(img, depths, num_bins=10, fraction=0.01, 
 Estimates coefficients for the backscatter curve
 based on the backscatter point values and their depths
 '''
-def find_backscatter_values(B_pts, depths, restarts=10, max_mean_loss_fraction=0.1):
+def find_backscatter_values(B_pts, depths, restarts=200, max_mean_loss_fraction=0.1):
     B_vals, B_depths = B_pts[:, 1], B_pts[:, 0]
     z_max, z_min = np.max(depths), np.min(depths)
     max_mean_loss = max_mean_loss_fraction * (z_max - z_min)
@@ -152,7 +155,7 @@ def filter_data(X, Y, radius_fraction=0.01):
 Estimate coefficients for the 2-term exponential
 describing the wideband attenuation
 '''
-def refine_wideband_attentuation(depths, illum, estimation, restarts=10, min_depth_fraction = 0.1, max_mean_loss_fraction=np.inf, l=1.0, radius_fraction=0.01):
+def refine_wideband_attentuation(depths, illum, estimation, restarts=250, min_depth_fraction = 0.1, max_mean_loss_fraction=np.inf, l=1.0, radius_fraction=0.01):
     eps = 1E-8
     z_max, z_min = np.max(depths), np.min(depths)
     min_depth = z_min + (min_depth_fraction * (z_max - z_min))
@@ -322,6 +325,7 @@ def process_image(filepath):
   #Loading the RGB image
   with rawpy.imread(filepath) as raw1:
       rgb=raw1.raw_image_visible
+      cv2.imwrite("og_image.jpg",raw1.postprocess())
       saturation=raw1.camera_white_level_per_channel[0]
       black=min(raw1.black_level_per_channel[0],rgb.min())
       rgb=rgb.astype(np.float64)
@@ -356,11 +360,14 @@ def image_resize(image, width = None, height = None, inter = cv2.INTER_AREA):
 
 def load_image_and_depth_map(img_fname, depths_fname, size_limit = 1024):
 
-    depths = Image.open(depths_fname)
+    #depths = scipy.io.loadmat(depths_fname)["dist_map_l"]
+    #depths = np.nan_to_num(depths, copy=True, nan=0.0, posinf=0.0, neginf=0.0)
+
+    depths = np.array(Image.open(depths_fname))
     img  = process_image(img_fname)
     resized_img = image_resize(img,width=size_limit)
-
-    return resized_img,image_resize(np.array(depths),height=resized_img.shape[0],width=size_limit)
+    depth_resized = image_resize(depths,height=resized_img.shape[0],width=size_limit)
+    return resized_img,depth_resized
 
 '''
 White balance with 'grey world' hypothesis
@@ -437,13 +444,18 @@ def run_pipeline(img, depths, args):
         plt.title('Depth Map')
         plt.show()
 
+    save_coeffs = {}
     print('Estimating backscatter...', flush=True)
     ptsR, ptsG, ptsB = find_backscatter_estimation_points(img, depths, fraction=0.01, min_depth_percent=args.min_depth)
 
     print('Finding backscatter coefficients...', flush=True)
-    Br, coefsR = find_backscatter_values(ptsR, depths, restarts=25)
-    Bg, coefsG = find_backscatter_values(ptsG, depths, restarts=25)
-    Bb, coefsB = find_backscatter_values(ptsB, depths, restarts=25)
+    Br, coefsR = find_backscatter_values(ptsR, depths, restarts=200)
+    Bg, coefsG = find_backscatter_values(ptsG, depths, restarts=200)
+    Bb, coefsB = find_backscatter_values(ptsB, depths, restarts=200)
+    
+    save_coeffs["backscatter_R"] = coefsR
+    save_coeffs["backscatter_G"] = coefsG
+    save_coeffs["backscatter_B"] = coefsB
 
     if args.output_graphs:
         print('Coefficients: \n{}\n{}\n{}'.format(coefsR, coefsG, coefsB), flush=True)
@@ -502,7 +514,7 @@ def run_pipeline(img, depths, args):
     refined_beta_D_g, coefsG = refine_wideband_attentuation(depths, illG, beta_D_g, radius_fraction=args.spread_data_fraction, l=args.l)
     beta_D_b, _ = estimate_wideband_attentuation(depths, illB)
     refined_beta_D_b, coefsB = refine_wideband_attentuation(depths, illB, beta_D_b, radius_fraction=args.spread_data_fraction, l=args.l)
-
+    
     if args.output_graphs:
         print('Coefficients: \n{}\n{}\n{}'.format(coefsR, coefsG, coefsB), flush=True)
         # plot the wideband attenuation values
@@ -516,6 +528,9 @@ def run_pipeline(img, depths, args):
         plt.imshow(np.stack([np.zeros_like(beta_D_r), np.zeros_like(beta_D_r), scale(refined_beta_D_b)], axis=2))
         plt.show()
 
+    save_coeffs["direct_R"] = coefsR
+    save_coeffs["direct_G"] = coefsG
+    save_coeffs["direct_B"] = coefsB
     # check optimization for beta_D channel
     if args.output_graphs:
         eps = 1E-5
@@ -573,7 +588,7 @@ def run_pipeline(img, depths, args):
         plt.savefig('components.png')
         plt.show()
 
-    return recovered
+    return recovered,save_coeffs
 
 def preprocess_for_monodepth(img_fname, output_fname, size_limit=1024):
     img = Image.fromarray(rawpy.imread(img_fname).postprocess())
@@ -586,7 +601,9 @@ def preprocess_sfm_depth_map(depths, min_depth, max_depth):
     z_max = np.min(depths) + (max_depth * (np.max(depths) - np.min(depths)))
     if max_depth != 0:
         depths[depths == 0] = z_max
-    depths[depths < z_min] = 0
+    if np.min(depths)==0:
+        depths[depths < z_min] = 0
+    
     return depths
 
 def preprocess_monodepth_depth_map(depths, additive_depth, multiply_depth):
@@ -600,9 +617,9 @@ if __name__ == '__main__':
     parser.add_argument('--image', required=True, help='Input image')
     parser.add_argument('--depth-map', required=True, help='Input depth map')
     parser.add_argument('--output', default='output.png', help='Output filename')
-    parser.add_argument('--f', type=float, default=2.0, help='f value (controls brightness)')
+    parser.add_argument('--f', type=float, default=2.0, help='f value (controls brightness)') # p = f*ac
     parser.add_argument('--l', type=float, default=0.5, help='l value (controls balance of attenuation constants)')
-    parser.add_argument('--p', type=float, default=0.001, help='p value (controls locality of illuminant map)')
+    parser.add_argument('--p', type=float, default=0.001, help='p value (controls locality of illuminant map)') #Epsilon ig
     parser.add_argument('--min-depth', type=float, default=0.1, help='Minimum depth value to use in estimations (range 0-1)')
     parser.add_argument('--max-depth', type=float, default=1.0, help='Replacement depth percentile value for invalid depths (range 0-1)')
     parser.add_argument('--spread-data-fraction', type=float, default=0.01, help='Require data to be this fraction of depth range away from each other in attenuation estimations')
@@ -612,7 +629,7 @@ if __name__ == '__main__':
     parser.add_argument('--monodepth', action='store_true',default=False, help='Preprocess for monodepth')
     parser.add_argument('--monodepth-add-depth', type=float, default=2.0, help='Additive value for monodepth map')
     parser.add_argument('--monodepth-multiply-depth', type=float, default=10.0, help='Multiplicative value for monodepth map')
-    parser.add_argument('--equalize-image', action='store_true',default=False, help='Histogram equalization for final output')
+    parser.add_argument('--equalize-image', action='store_true',default=True, help='Histogram equalization for final output')
     args = parser.parse_args()
 
     if args.preprocess_for_monodepth:
@@ -620,16 +637,31 @@ if __name__ == '__main__':
     else:
         print('Loading image...', flush=True)
         img, depths = load_image_and_depth_map(args.image, args.depth_map, args.size)
+        imageio.imwrite("depth.jpg",depths)
         if args.monodepth:
             depths = preprocess_monodepth_depth_map(depths, args.monodepth_add_depth, args.monodepth_multiply_depth)
         else:
             depths = preprocess_sfm_depth_map(depths, args.min_depth, args.max_depth)
-        recovered = run_pipeline(img, depths, args)
+        recovered,coefs = run_pipeline(img, depths, args)
+        plt.imsave("results/"+args.output, recovered)        
         
-        if args.equalize_image:
-            recovered = exposure.equalize_adapthist(np.array(recovered), clip_limit=0.03)
-            sigma_est = estimate_sigma(recovered, multichannel=True, average_sigmas=True)
-            recovered = denoise_tv_chambolle(recovered, sigma_est, multichannel=True)
-    
-        plt.imsave(args.output, recovered)
+        recovered = exposure.equalize_adapthist(np.array(recovered), clip_limit=0.008)
+        sigma_est = estimate_sigma(recovered, multichannel=True, average_sigmas=True)
+        recovered = denoise_tv_chambolle(recovered, sigma_est, multichannel=True)
+
+        plt.imsave("results/"+args.output+"processed.png", recovered)
         print('Done.')
+
+        coefs["file_name"] = args.image
+        coefs["depth_mean"] = depths.mean()
+        coefs["depth_std_dev"] = depths.std()
+
+        csv_columns = list(coefs.keys())
+        csv_file = "statistics.csv"
+        try:
+            with open('statistics.csv', 'a') as csv_file:  
+                writer = csv.writer(csv_file)
+                for key, value in coefs.items():
+                    writer.writerow([key, value])
+        except IOError:
+            print("I/O error")
